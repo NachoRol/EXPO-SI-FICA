@@ -1,0 +1,244 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+from math import acos, degrees
+import os  # Asegúrate de importar el módulo os
+import snap7
+from snap7.util import set_bool
+import time
+
+
+# Conectar al PLC
+plc = snap7.client.Client()
+plc.connect('192.168.10.10', 0, 0)
+print('Conectado al PLC')
+
+def palm_centroid(coordinates_list):
+    coordinates = np.array(coordinates_list)
+    centroid = np.mean(coordinates, axis=0)
+    centroid = int(centroid[0]), int(centroid[1])
+    return centroid
+
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
+mp_hands = mp.solutions.hands
+
+cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+
+# Optimización: reducir el tamaño del frame capturado si la tasa de refresco es lenta
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)  # Ajustar estos valores según tu hardware
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+# Reducir el tamaño del buffer para evitar retrasos
+#cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+# Cargar la imagen
+logo = cv2.imread('C:/Users/DATI-PC/Desktop/EXPO-2024/FICA.jpg')  # Reemplaza con la ruta de tu imagen
+#logo = cv2.imread('E:/Expo/FICA.jpg')  # Reemplaza con la ruta de tu imagen
+logo_height, logo_width, _ = logo.shape
+
+# Redimensionar la imagen si es necesario
+scale_factor = 0.5  # Ajusta este valor
+logo = cv2.resize(logo, (int(logo_width * scale_factor), int(logo_height * scale_factor)))
+logo_height, logo_width, _ = logo.shape
+
+# Pulgar
+thumb_points = [1, 2, 4]
+
+# Índice, medio, anular y meñique
+palm_points = [0, 1, 2, 5, 9, 13, 17]
+fingertips_points = [8, 12, 16, 20]
+finger_base_points = [6, 10, 14, 18]
+
+# Colores
+BLANCO = (255, 255, 255)
+GREEN = (48, 255, 48)
+BLUE = (192, 101, 21)
+YELLOW = (0, 204, 255)  # Color cuando el dedo está abierto
+RED = (0, 0, 255)  # Color cuando el dedo está cerrado
+PURPLE = (128, 64, 128)
+PEACH = (180, 229, 255)
+GRAY = (150, 140, 128)  # Color gris para las líneas
+
+last_capture_time = time.time()
+
+with mp_hands.Hands(
+        model_complexity=1,
+        max_num_hands=1,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5) as hands:
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.flip(frame, 1)
+        height, width, _ = frame.shape
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(frame_rgb)
+        fingers_counter = "_"
+        thickness = [2, 2, 2, 2, 2]
+
+        # Vector para representar la posición de los dedos (1 = abierto, 0 = cerrado)
+        fingers_vector = [0, 0, 0, 0, 0]  # Pulgar, índice, medio, anular, meñique
+
+        if results.multi_hand_landmarks:
+            coordinates_thumb = []
+            coordinates_palm = []
+            coordinates_ft = []
+            coordinates_fb = []
+            for hand_landmarks in results.multi_hand_landmarks:
+                for index in thumb_points:
+                    x = int(hand_landmarks.landmark[index].x * width)
+                    y = int(hand_landmarks.landmark[index].y * height)
+                    coordinates_thumb.append([x, y])
+                
+                for index in palm_points:
+                    x = int(hand_landmarks.landmark[index].x * width)
+                    y = int(hand_landmarks.landmark[index].y * height)
+                    coordinates_palm.append([x, y])
+                
+                for index in fingertips_points:
+                    x = int(hand_landmarks.landmark[index].x * width)
+                    y = int(hand_landmarks.landmark[index].y * height)
+                    coordinates_ft.append([x, y])
+                
+                for index in finger_base_points:
+                    x = int(hand_landmarks.landmark[index].x * width)
+                    y = int(hand_landmarks.landmark[index].y * height)
+                    coordinates_fb.append([x, y])
+                
+                ##########################
+                # Pulgar
+                p1 = np.array(coordinates_thumb[0])
+                p2 = np.array(coordinates_thumb[1])
+                p3 = np.array(coordinates_thumb[2])
+
+                l1 = np.linalg.norm(p2 - p3)
+                l2 = np.linalg.norm(p1 - p3)
+                l3 = np.linalg.norm(p1 - p2)
+
+                # Calcular el ángulo
+                angle = degrees(acos((l1**2 + l3**2 - l2**2) / (2 * l1 * l3)))
+                thumb_finger = np.array(False)
+                if angle > 150:
+                    thumb_finger = np.array(True)
+                
+                ################################
+                # Índice, medio, anular y meñique
+                nx, ny = palm_centroid(coordinates_palm)
+                cv2.circle(frame, (nx, ny), 3, (0, 255, 0), 2)
+                coordinates_centroid = np.array([nx, ny])
+                coordinates_ft = np.array(coordinates_ft)
+                coordinates_fb = np.array(coordinates_fb)
+
+                # Distancias
+                d_centrid_ft = np.linalg.norm(coordinates_centroid - coordinates_ft, axis=1)
+                d_centrid_fb = np.linalg.norm(coordinates_centroid - coordinates_fb, axis=1)
+                dif = d_centrid_ft - d_centrid_fb
+                fingers = dif > 0
+                fingers = np.append(thumb_finger, fingers)
+                fingers_counter = str(np.count_nonzero(fingers == True))
+                
+                for (i, finger) in enumerate(fingers):
+                    if finger == True:
+                        thickness[i] = -1
+                        fingers_vector[i] = 1  # Dedo abierto
+                    else:
+                        fingers_vector[i] = 0  # Dedo cerrado
+
+                # Dibujar las líneas con color gris
+                mp_drawing.draw_landmarks(
+                    frame,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS,
+                    landmark_drawing_spec=mp_drawing.DrawingSpec(color=GREEN, thickness=2),
+                    connection_drawing_spec=mp_drawing.DrawingSpec(color=GRAY, thickness=2))
+
+
+                # Dibujar círculos en las puntas de los dedos
+                for i, ft in enumerate(coordinates_ft):
+                    color = GREEN if fingers_vector[i + 1] == 1 else RED  # Color según el estado (1 = amarillo, 0 = rojo)
+                    cv2.circle(frame, tuple(ft), 12, color, -1)
+
+                # Círculo grande en la punta del pulgar (dedo gordo)
+                thumb_color = GREEN if fingers_vector[0] == 1 else RED
+                cv2.circle(frame, tuple(coordinates_thumb[-1]), 15, thumb_color, -1)  # Pulgar círculo más grande
+            
+                       
+            # Imprimir el vector de dedos en la terminal (Pulgar, Índice, Medio, Anular, Menique)
+            print(f"Vector de dedos (Pulgar, Índice, Medio, Anular, Menique): {fingers_vector}")
+
+            # Mapear la detección de dedos a marcas de memoria en el PLC
+            marcas_memoria = {
+                0: (24, 0),  # M24.0
+                1: (24, 1),  # M24.1
+                2: (24, 2),  # M24.2
+                3: (24, 3),  # M24.3
+                4: (24, 4),  # M24.4
+            }
+            for i, valor in enumerate(fingers_vector):
+                byte, bit = marcas_memoria[i]
+                # Leer el byte actual de la marca de memoria
+                marca = plc.read_area(snap7.type.Areas.MK, 0, byte, 1)
+                # Convertir el valor leído en un array de bytes
+                marca_bytes = bytearray(marca)
+                # Escribir el valor del bit correspondiente basado en la detección
+                set_bool(marca_bytes, 0, bit, valor)
+                # Escribir el byte modificado de vuelta a la marca de memoria del PLC
+                plc.write_area(snap7.type.Areas.MK, 0, byte, marca_bytes)
+
+        ################################
+        # Visualización de Número de dedos y nombre de dedos
+        cv2.rectangle(frame, (0, 0), (80, 80), GRAY, -1)
+        cv2.putText(frame, fingers_counter, (15, 65), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
+        # Pulgar
+        #cv2.circle(frame,(cx,cy),10,(0,255,0),-1)
+        cv2.circle(frame, (125, 30), 25, RED, thickness[0])
+        #cv2.rectangle(frame, (100, 10), (150, 60), RED, thickness[0])
+        cv2.putText(frame, "Pulgar", (100, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # Índice
+        cv2.circle(frame, (185, 30), 25, YELLOW, thickness[1])
+        #cv2.rectangle(frame, (160, 10), (210, 60), RED, thickness[1])
+        cv2.putText(frame, "Indice", (163, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # Medio
+        cv2.circle(frame, (246, 30), 25, GREEN, thickness[2])
+        #cv2.rectangle(frame, (220, 10), (270, 60), RED, thickness[2])
+        cv2.putText(frame, "Medio", (222, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # Anular
+        cv2.circle(frame, (306, 30), 25, BLUE, thickness[3])
+        #cv2.rectangle(frame, (280, 10), (330, 60), RED, thickness[3])
+        cv2.putText(frame, "Anular", (282, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # Menique
+        cv2.circle(frame, (368, 30), 25, BLANCO, thickness[4])
+        #cv2.rectangle(frame, (340, 10), (390, 60), RED, thickness[4])
+        cv2.putText(frame, "Menique", (340, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        # Superponer la imagen en la esquina superior derecha
+        roi = frame[10:10 + logo_height, width - logo_width - 10:width - 10]
+        logo_gray = cv2.cvtColor(logo, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(logo_gray, 1, 255, cv2.THRESH_BINARY)
+        frame_bg = cv2.bitwise_and(roi, roi, mask=cv2.bitwise_not(mask))
+        logo_fg = cv2.bitwise_and(logo, logo, mask=mask)
+        dst = cv2.add(frame_bg, logo_fg)
+        frame[10:10 + logo_height, width - logo_width - 10:width - 10] = dst
+
+        # Mostrar la imagen a pantalla completa
+        cv2.namedWindow("Frame", cv2.WND_PROP_FULLSCREEN)
+        cv2.setWindowProperty("Frame", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        cv2.imshow("Frame", frame)
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
+        
+        #Toma de capturas cada 5 minutos
+        current_time = time.time()
+        if current_time - last_capture_time >= 300:
+                #Captura de imagen
+                last_capture_time = current_time
+
+                capture_filname = f"C:/Users/DATI-PC/Desktop/EXPO-2024/FOTOS/captura_{int(current_time)}.jpg"  # Reemplaza con la ruta de la carpeta de almacenamiento de FOTOS
+                cv2.imwrite(capture_filname, frame)
+                print (f"Captura guardada: {capture_filname}")
+
+cap.release()
+cv2.destroyAllWindows() 
